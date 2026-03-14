@@ -182,6 +182,21 @@ interface PluginConfig {
   };
   mdMirror?: { enabled?: boolean; dir?: string };
   workspaceBoundary?: WorkspaceBoundaryConfig;
+  layer3Fallback?: {
+    enabled?: boolean;
+    agent?: string;
+    notebook?: string;
+    notebookId?: string;
+    timeout?: number;
+    triggers?: {
+      timeKeywords?: string[];
+      reasoningKeywords?: string[];
+      minResults?: number;
+      minScore?: number;
+      minAvgScore?: number;
+      explicitKeywords?: string[];
+    };
+  };
   admissionControl?: AdmissionControlConfig;
 }
 
@@ -2085,6 +2100,7 @@ const memoryLanceDBProPlugin = {
         workspaceDir: getDefaultWorkspaceDir(),
         mdMirror,
         workspaceBoundary: config.workspaceBoundary,
+        layer3Fallback: config.layer3Fallback,
       },
       {
         enableManagementTools: config.enableManagementTools,
@@ -3581,6 +3597,9 @@ export function parsePluginConfig(value: unknown): PluginConfig {
   const userMdExclusiveRaw = typeof workspaceBoundaryRaw?.userMdExclusive === "object" && workspaceBoundaryRaw.userMdExclusive !== null
     ? workspaceBoundaryRaw.userMdExclusive as Record<string, unknown>
     : null;
+  const layer3FallbackRaw = typeof cfg.layer3Fallback === "object" && cfg.layer3Fallback !== null
+    ? cfg.layer3Fallback as Record<string, unknown>
+    : null;
   const sessionStrategyRaw = cfg.sessionStrategy;
   const legacySessionMemoryEnabled = typeof sessionMemoryRaw?.enabled === "boolean"
     ? sessionMemoryRaw.enabled
@@ -3734,6 +3753,27 @@ export function parsePluginConfig(value: unknown): PluginConfig {
               filterRecall: userMdExclusiveRaw.filterRecall !== false,
             }
             : undefined,
+          enabled: (cfg.layer3Fallback as Record<string, unknown>).enabled === true,
+          agent: asNonEmptyString((cfg.layer3Fallback as Record<string, unknown>).agent) ?? "notebooklm",
+          notebook: asNonEmptyString((cfg.layer3Fallback as Record<string, unknown>).notebook) ?? "memory-archive",
+          notebookId: asNonEmptyString((cfg.layer3Fallback as Record<string, unknown>).notebookId),
+          timeout: parsePositiveInt((cfg.layer3Fallback as Record<string, unknown>).timeout) ?? 45,
+          triggers: (() => {
+            const triggers = (cfg.layer3Fallback as Record<string, unknown>).triggers;
+            if (!triggers || typeof triggers !== "object" || Array.isArray(triggers)) return undefined;
+            const obj = triggers as Record<string, unknown>;
+            const toStringArray = (value: unknown) => Array.isArray(value)
+              ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+              : undefined;
+            return {
+              timeKeywords: toStringArray(obj.timeKeywords),
+              reasoningKeywords: toStringArray(obj.reasoningKeywords),
+              minResults: parsePositiveInt(obj.minResults),
+              minScore: typeof obj.minScore === "number" ? obj.minScore : undefined,
+              minAvgScore: typeof obj.minAvgScore === "number" ? obj.minAvgScore : undefined,
+              explicitKeywords: toStringArray(obj.explicitKeywords),
+            };
+          })(),
         }
         : undefined,
     admissionControl: normalizeAdmissionControlConfig(cfg.admissionControl),
