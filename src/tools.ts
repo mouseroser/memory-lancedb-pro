@@ -1305,7 +1305,7 @@ export function registerMemoryStatsTool(
         const { scope } = params as { scope?: string };
 
         try {
-          const agentId = resolveRuntimeAgentId(runtimeContext.agentId, runtimeCtx);
+          const agentId = resolveRuntimeAgentId(runtimeContext.agentId, runtimeCtx) || "main";
           // Determine accessible scopes
           let scopeFilter = resolveScopeFilter(context.scopeManager, agentId);
           if (scope) {
@@ -1420,7 +1420,7 @@ export function registerMemoryListTool(
         try {
           const safeLimit = clampInt(limit, 1, 50);
           const safeOffset = clampInt(offset, 0, 1000);
-          const agentId = resolveRuntimeAgentId(runtimeContext.agentId, runtimeCtx);
+          const agentId = resolveRuntimeAgentId(runtimeContext.agentId, runtimeCtx) || "main";
 
           // Determine accessible scopes
           let scopeFilter = resolveScopeFilter(context.scopeManager, agentId);
