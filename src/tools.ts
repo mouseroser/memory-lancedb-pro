@@ -5,6 +5,7 @@
 
 import { Type } from "@sinclair/typebox";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
@@ -489,6 +490,30 @@ export function safeParseJson(raw: string): {
   };
 }
 
+function createLayer3FallbackSessionId(): string {
+  return `memory-layer3-fallback-${Date.now()}-${randomUUID()}`;
+}
+
+export function buildNotebookLMFallbackCommand(
+  query: string,
+  config?: Layer3FallbackSettings,
+): string[] {
+  const resolved = resolveLayer3FallbackSettings(config);
+  const notebookInfo = resolved.notebookId
+    ? `${resolved.notebook} (${resolved.notebookId})`
+    : resolved.notebook;
+  const task = `查询 ${resolved.notebook} notebook：${query}\n\n使用 notebook: ${notebookInfo}\n\n请直接返回查询结果。`;
+
+  return [
+    "agent",
+    "--agent", resolved.agent,
+    "--json",
+    "--timeout", String(resolved.timeout),
+    "--session-id", createLayer3FallbackSessionId(),
+    "--message", task,
+  ];
+}
+
 async function runNotebookLMFallbackQuery(
   query: string,
   config?: Layer3FallbackSettings,
@@ -496,18 +521,7 @@ async function runNotebookLMFallbackQuery(
   | { ok: true; text: string; raw: unknown; command: string[]; parseMode?: "direct" | "extracted" }
   | { ok: false; error: string; command: string[] }
 > {
-  const resolved = resolveLayer3FallbackSettings(config);
-  const notebookInfo = resolved.notebookId
-    ? `${resolved.notebook} (${resolved.notebookId})`
-    : resolved.notebook;
-  const task = `查询 ${resolved.notebook} notebook：${query}\n\n使用 notebook: ${notebookInfo}\n\n请直接返回查询结果。`;
-  const command = [
-    "agent",
-    "--agent", resolved.agent,
-    "--json",
-    "--timeout", String(resolved.timeout),
-    "--message", task,
-  ];
+  const command = buildNotebookLMFallbackCommand(query, config);
 
   return await new Promise((resolve) => {
     const child = spawn("openclaw", command, { stdio: ["ignore", "pipe", "pipe"] });

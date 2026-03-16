@@ -19,6 +19,7 @@ const {
   resolveLayer3FallbackSettings,
   extractCandidateJson,
   safeParseJson,
+  buildNotebookLMFallbackCommand,
 } = jiti("../src/tools.ts");
 
 function baseConfig() {
@@ -98,6 +99,41 @@ describe("layer3 fallback JSON parsing", () => {
     assert.equal(parsed.ok, true);
     assert.equal(parsed.mode, "extracted");
     assert.equal(parsed.value.result.payloads[0].text, "Notebook result");
+  });
+});
+
+describe("layer3 fallback command construction", () => {
+  it("uses an isolated session id for each fallback invocation", () => {
+    const first = buildNotebookLMFallbackCommand("今天完成了什么？", {
+      enabled: true,
+      agent: "notebooklm",
+      notebook: "memory-archive",
+      notebookId: "94f8",
+      timeout: 75,
+    });
+    const second = buildNotebookLMFallbackCommand("今天完成了什么？", {
+      enabled: true,
+      agent: "notebooklm",
+      notebook: "memory-archive",
+      notebookId: "94f8",
+      timeout: 75,
+    });
+
+    const firstSessionIndex = first.indexOf("--session-id");
+    const secondSessionIndex = second.indexOf("--session-id");
+
+    assert.ok(firstSessionIndex > -1, "first command should include --session-id");
+    assert.ok(secondSessionIndex > -1, "second command should include --session-id");
+    assert.match(first[firstSessionIndex + 1], /^memory-layer3-fallback-/);
+    assert.match(second[secondSessionIndex + 1], /^memory-layer3-fallback-/);
+    assert.notEqual(first[firstSessionIndex + 1], second[secondSessionIndex + 1]);
+
+    assert.equal(first[first.indexOf("--agent") + 1], "notebooklm");
+    assert.equal(
+      first[first.indexOf("--timeout") + 1],
+      String(resolveLayer3FallbackSettings({ timeout: 75 }).timeout),
+    );
+    assert.match(first[first.indexOf("--message") + 1], /memory-archive \(94f8\)/);
   });
 });
 
