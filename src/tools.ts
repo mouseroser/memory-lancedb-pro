@@ -490,8 +490,14 @@ export function safeParseJson(raw: string): {
   };
 }
 
-function createLayer3FallbackSessionId(): string {
-  return `memory-layer3-fallback-${Date.now()}-${randomUUID()}`;
+/**
+ * Resolve the path to nlm-gateway.sh.
+ * Uses NLM_GATEWAY_PATH env var if set, otherwise falls back to the
+ * standard skill location.
+ */
+function resolveNlmGatewayPath(): string {
+  if (process.env.NLM_GATEWAY_PATH) return process.env.NLM_GATEWAY_PATH;
+  return join(homedir(), ".openclaw", "skills", "notebooklm", "scripts", "nlm-gateway.sh");
 }
 
 export function buildNotebookLMFallbackCommand(
@@ -499,18 +505,20 @@ export function buildNotebookLMFallbackCommand(
   config?: Layer3FallbackSettings,
 ): string[] {
   const resolved = resolveLayer3FallbackSettings(config);
-  const notebookInfo = resolved.notebookId
-    ? `${resolved.notebook} (${resolved.notebookId})`
-    : resolved.notebook;
-  const task = `查询 ${resolved.notebook} notebook：${query}\n\n使用 notebook: ${notebookInfo}\n\n请直接返回查询结果。`;
 
+  // Use nlm-gateway.sh directly instead of `openclaw agent --agent notebooklm`.
+  // Reason: `openclaw agent` routes through the gateway lane system which
+  // acquires a per-agent session file lock. When Layer 3 fallback fires
+  // concurrently (or while a cron job holds the notebooklm lane), the lock
+  // contention causes cascading timeouts. nlm-gateway.sh calls the
+  // notebooklm CLI directly with its own lightweight flock, avoiding the
+  // gateway lane entirely.
   return [
-    "agent",
+    resolveNlmGatewayPath(),
+    "query",
     "--agent", resolved.agent,
-    "--json",
-    "--timeout", String(resolved.timeout),
-    "--session-id", createLayer3FallbackSessionId(),
-    "--message", task,
+    "--notebook", resolved.notebook,
+    "--query", query,
   ];
 }
 
@@ -521,10 +529,20 @@ async function runNotebookLMFallbackQuery(
   | { ok: true; text: string; raw: unknown; command: string[]; parseMode?: "direct" | "extracted" }
   | { ok: false; error: string; command: string[] }
 > {
+  const resolved = resolveLayer3FallbackSettings(config);
   const command = buildNotebookLMFallbackCommand(query, config);
+  const executable = command[0];
+  const args = command.slice(1);
+
+  // Apply timeout via AbortSignal so the child process is killed if it
+  // exceeds the configured layer3 timeout.
+  const timeoutMs = resolved.timeout * 1000;
 
   return await new Promise((resolve) => {
-    const child = spawn("openclaw", command, { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(executable, args, {
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: timeoutMs,
+    });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => { stdout += String(chunk); });
@@ -532,7 +550,7 @@ async function runNotebookLMFallbackQuery(
     child.on("error", (error) => resolve({ ok: false, error: error.message, command }));
     child.on("close", (code) => {
       if (code !== 0) {
-        resolve({ ok: false, error: stderr.trim() || `openclaw agent exited with code ${code}`, command });
+        resolve({ ok: false, error: stderr.trim() || `nlm-gateway exited with code ${code}`, command });
         return;
       }
       const trimmed = stdout.trim();
@@ -544,9 +562,11 @@ async function runNotebookLMFallbackQuery(
       const parseResult = safeParseJson(trimmed);
 
       if (parseResult.ok) {
-        const text = parseResult.value?.content?.[0]?.text
-          || parseResult.value?.result?.payloads?.[0]?.text
-          || parseResult.value?.payloads?.[0]?.text
+        // nlm-gateway returns { ok: true, data: { answer, citations, ... } }
+        const data = parseResult.value?.data;
+        const text = data?.answer
+          || data?.text
+          || parseResult.value?.content?.[0]?.text
           || parseResult.value?.text
           || parseResult.value?.message
           || "";

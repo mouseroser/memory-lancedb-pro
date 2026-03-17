@@ -103,7 +103,7 @@ describe("layer3 fallback JSON parsing", () => {
 });
 
 describe("layer3 fallback command construction", () => {
-  it("uses an isolated session id for each fallback invocation", () => {
+  it("uses nlm-gateway.sh directly to avoid gateway lane lock contention", () => {
     const first = buildNotebookLMFallbackCommand("今天完成了什么？", {
       enabled: true,
       agent: "notebooklm",
@@ -119,21 +119,20 @@ describe("layer3 fallback command construction", () => {
       timeout: 75,
     });
 
-    const firstSessionIndex = first.indexOf("--session-id");
-    const secondSessionIndex = second.indexOf("--session-id");
-
-    assert.ok(firstSessionIndex > -1, "first command should include --session-id");
-    assert.ok(secondSessionIndex > -1, "second command should include --session-id");
-    assert.match(first[firstSessionIndex + 1], /^memory-layer3-fallback-/);
-    assert.match(second[secondSessionIndex + 1], /^memory-layer3-fallback-/);
-    assert.notEqual(first[firstSessionIndex + 1], second[secondSessionIndex + 1]);
-
+    // Should invoke nlm-gateway.sh, not openclaw agent
+    assert.ok(first[0].endsWith("nlm-gateway.sh"), `expected nlm-gateway.sh but got ${first[0]}`);
+    assert.equal(first[1], "query");
     assert.equal(first[first.indexOf("--agent") + 1], "notebooklm");
-    assert.equal(
-      first[first.indexOf("--timeout") + 1],
-      String(resolveLayer3FallbackSettings({ timeout: 75 }).timeout),
-    );
-    assert.match(first[first.indexOf("--message") + 1], /memory-archive \(94f8\)/);
+    assert.equal(first[first.indexOf("--notebook") + 1], "memory-archive");
+    assert.ok(first.includes("--query"), "should include --query flag");
+
+    // Should NOT include openclaw agent flags
+    assert.ok(!first.includes("--session-id"), "should not include --session-id (not openclaw agent)");
+    assert.ok(!first.includes("--json"), "should not include --json (nlm-gateway returns JSON natively)");
+    assert.ok(!first.includes("--message"), "should not include --message (not openclaw agent)");
+
+    // Both calls should produce identical structure (no random session ids needed)
+    assert.deepEqual(first.slice(0, 4), second.slice(0, 4));
   });
 });
 
