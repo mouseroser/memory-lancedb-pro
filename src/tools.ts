@@ -269,7 +269,9 @@ const DEFAULT_LAYER3_FALLBACK: Required<Omit<Layer3FallbackSettings, "triggers">
   notebook: "memory-archive",
   notebookId: "",
   timeout: 45,
-  // timeout must stay well below the main agent 60s tool window
+  // Conservative default. When using nlm-gateway directly we can honor
+  // higher configured timeouts because we no longer route through the
+  // embedded `openclaw agent` path.
   triggers: {
     timeKeywords: ["今天", "昨天", "最近", "本周", "上周", "这个月"],
     reasoningKeywords: ["为什么", "如何", "怎么", "对比", "区别"],
@@ -290,7 +292,10 @@ export function resolveLayer3FallbackSettings(config?: Layer3FallbackSettings) {
     },
   };
 
-  resolved.timeout = Math.min(resolved.timeout, 50);
+  const normalizedTimeout = Number.isFinite(resolved.timeout)
+    ? Math.floor(resolved.timeout)
+    : DEFAULT_LAYER3_FALLBACK.timeout;
+  resolved.timeout = Math.max(1, normalizedTimeout || DEFAULT_LAYER3_FALLBACK.timeout);
 
   return resolved;
 }
@@ -548,9 +553,17 @@ async function runNotebookLMFallbackQuery(
     child.stdout.on("data", (chunk) => { stdout += String(chunk); });
     child.stderr.on("data", (chunk) => { stderr += String(chunk); });
     child.on("error", (error) => resolve({ ok: false, error: error.message, command }));
-    child.on("close", (code) => {
+    child.on("close", (code, signal) => {
       if (code !== 0) {
-        resolve({ ok: false, error: stderr.trim() || `nlm-gateway exited with code ${code}`, command });
+        const baseError = stderr.trim();
+        const timeoutHint = signal === "SIGTERM" ? ` (timeout ${timeoutMs}ms)` : "";
+        resolve({
+          ok: false,
+          error: baseError || (signal
+            ? `nlm-gateway terminated by ${signal}${timeoutHint}`
+            : `nlm-gateway exited with code ${code}`),
+          command,
+        });
         return;
       }
       const trimmed = stdout.trim();

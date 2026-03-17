@@ -59,6 +59,7 @@ describe("layer3 fallback config", () => {
     });
     assert.equal(parsed.layer3Fallback?.enabled, true);
     assert.equal(parsed.layer3Fallback?.timeout, 75);
+    assert.equal(resolveLayer3FallbackSettings(parsed.layer3Fallback).timeout, 75);
     assert.equal(parsed.layer3Fallback?.triggers?.minResults, 4);
     assert.deepEqual(parsed.layer3Fallback?.triggers?.timeKeywords, ["今天"]);
   });
