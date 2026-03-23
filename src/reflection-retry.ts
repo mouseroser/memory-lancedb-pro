@@ -27,6 +27,11 @@ type RetryRunnerParams<T> = {
   onLog?: (level: "info" | "warn", message: string) => void;
   random?: () => number;
   sleep?: (ms: number) => Promise<void>;
+  // 4F.2: time-aware retry — absolute deadline (Date.now() epoch ms).
+  // If set, retry is skipped when remaining budget < delay + minExecutionMs.
+  deadlineMs?: number;
+  /** Minimum execution time needed for the retry attempt (default: 8000ms). */
+  minRetryExecutionMs?: number;
 };
 
 const REFLECTION_TRANSIENT_PATTERNS: RegExp[] = [
@@ -156,6 +161,22 @@ export async function runWithReflectionTransientRetryOnce<T>(
     if (!decision.retryable) throw error;
 
     const delayMs = computeReflectionRetryDelayMs(params.random);
+
+    // 4F.2: time-aware retry — skip if insufficient time budget remains
+    const minExecMs = params.minRetryExecutionMs ?? 8000;
+    if (params.deadlineMs !== undefined) {
+      const remainingMs = params.deadlineMs - Date.now();
+      if (remainingMs < delayMs + minExecMs) {
+        params.onLog?.(
+          "warn",
+          `memory-${params.scope}: skipping retry — insufficient time budget ` +
+          `(remaining=${remainingMs}ms, need=${delayMs + minExecMs}ms). ` +
+          `error=${decision.normalizedError}`
+        );
+        throw error;
+      }
+    }
+
     params.retryState.count += 1;
     params.onLog?.(
       "warn",

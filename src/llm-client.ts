@@ -32,34 +32,87 @@ export interface LlmClient {
   getLastError(): string | null;
 }
 
-/**
- * Extract JSON from an LLM response that may be wrapped in markdown fences
- * or contain surrounding text.
- */
-function extractJsonFromResponse(text: string): string | null {
-  const fenceMatch = text.match(/```(?:json)?\s*\n?([\s\S]*?)```/);
-  if (fenceMatch) {
-    return fenceMatch[1].trim();
-  }
+// 4F.4: strip unsafe control characters (NUL, BEL, BS, etc.) before JSON parsing
+function stripControlChars(text: string): string {
+  return text.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "");
+}
 
-  const firstBrace = text.indexOf("{");
-  if (firstBrace === -1) return null;
+/**
+ * String-escape-aware balanced brace/bracket extraction.
+ * Handles escaped quotes inside JSON string literals so braces within
+ * strings don't break the depth counter.
+ */
+function extractBalancedJson(text: string, startIndex: number): string | null {
+  const opener = text[startIndex];
+  const closer = opener === "{" ? "}" : opener === "[" ? "]" : null;
+  if (!closer) return null;
 
   let depth = 0;
-  let lastBrace = -1;
-  for (let i = firstBrace; i < text.length; i++) {
-    if (text[i] === "{") depth++;
-    else if (text[i] === "}") {
+  let inString = false;
+  let escaped = false;
+
+  for (let i = startIndex; i < text.length; i++) {
+    const char = text[i];
+    if (inString) {
+      if (escaped) { escaped = false; continue; }
+      if (char === "\\") { escaped = true; continue; }
+      if (char === '"') { inString = false; }
+      continue;
+    }
+    if (char === '"') { inString = true; continue; }
+    if (char === opener) { depth++; continue; }
+    if (char === closer) {
       depth--;
-      if (depth === 0) {
-        lastBrace = i;
-        break;
-      }
+      if (depth === 0) return text.slice(startIndex, i + 1);
+    }
+  }
+  return null;
+}
+
+/**
+ * 4F.4: Layered JSON defense parsing for LLM responses.
+ * Layer 1: Strip control chars
+ * Layer 2: Direct JSON.parse
+ * Layer 3: Fenced JSON extraction (```json ... ```)
+ * Layer 4: Balanced brace extraction (string-escape aware)
+ * Layer 5: Graceful degradation (return null)
+ */
+function extractJsonFromResponse(text: string): string | null {
+  // Layer 1: sanitize control characters
+  const cleaned = stripControlChars(text).trim();
+
+  // Layer 2: try direct parse (fastest path for well-formed JSON)
+  try {
+    JSON.parse(cleaned);
+    return cleaned;
+  } catch {}
+
+  // Layer 3: try markdown code fence (```json ... ``` or ``` ... ```)
+  const fenceMatch = cleaned.match(/```(?:json)?\s*\n?([\s\S]*?)```/);
+  if (fenceMatch) {
+    const fenced = fenceMatch[1].trim();
+    try {
+      JSON.parse(fenced);
+      return fenced;
+    } catch {}
+  }
+
+  // Layer 4: balanced brace extraction (string-escape aware)
+  for (let i = 0; i < cleaned.length; i++) {
+    const char = cleaned[i];
+    if (char !== "{" && char !== "[") continue;
+    const candidate = extractBalancedJson(cleaned, i);
+    if (!candidate) continue;
+    try {
+      JSON.parse(candidate);
+      return candidate;
+    } catch {
+      continue;
     }
   }
 
-  if (lastBrace === -1) return null;
-  return text.substring(firstBrace, lastBrace + 1);
+  // Layer 5: graceful degradation
+  return null;
 }
 
 function previewText(value: string, maxLen = 200): string {
@@ -68,121 +121,11 @@ function previewText(value: string, maxLen = 200): string {
   return `${normalized.slice(0, maxLen - 3)}...`;
 }
 
-function nextNonWhitespaceChar(text: string, start: number): string | undefined {
-  for (let i = start; i < text.length; i++) {
-    const ch = text[i];
-    if (!/\s/.test(ch)) return ch;
-  }
-  return undefined;
-}
-
-/**
- * Best-effort repair for common LLM JSON issues:
- * - unescaped quotes inside string values
- * - raw newlines / tabs inside strings
- * - trailing commas before } or ]
- */
-function repairCommonJson(text: string): string {
-  let result = "";
-  let inString = false;
-  let escaped = false;
-
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-
-    if (escaped) {
-      result += ch;
-      escaped = false;
-      continue;
-    }
-
-    if (inString) {
-      if (ch === "\\") {
-        result += ch;
-        escaped = true;
-        continue;
-      }
-
-      if (ch === "\"") {
-        const nextCh = nextNonWhitespaceChar(text, i + 1);
-        if (
-          nextCh === undefined ||
-          nextCh === "," ||
-          nextCh === "}" ||
-          nextCh === "]" ||
-          nextCh === ":"
-        ) {
-          result += ch;
-          inString = false;
-        } else {
-          result += "\\\"";
-        }
-        continue;
-      }
-
-      if (ch === "\n") {
-        result += "\\n";
-        continue;
-      }
-      if (ch === "\r") {
-        result += "\\r";
-        continue;
-      }
-      if (ch === "\t") {
-        result += "\\t";
-        continue;
-      }
-
-      result += ch;
-      continue;
-    }
-
-    if (ch === "\"") {
-      result += ch;
-      inString = true;
-      continue;
-    }
-
-    if (ch === ",") {
-      const nextCh = nextNonWhitespaceChar(text, i + 1);
-      if (nextCh === "}" || nextCh === "]") {
-        continue;
-      }
-    }
-
-    result += ch;
-  }
-
-  return result;
-}
-
-function looksLikeSseResponse(bodyText: string): boolean {
-  const trimmed = bodyText.trimStart();
-  return trimmed.startsWith("event:") || trimmed.startsWith("data:");
-}
-
-function createTimeoutSignal(timeoutMs?: number): { signal: AbortSignal; dispose: () => void } {
-  const effectiveTimeoutMs =
-    typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 30_000;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), effectiveTimeoutMs);
-  return {
-    signal: controller.signal,
-    dispose: () => clearTimeout(timer),
-  };
-}
-
-function createApiKeyClient(config: LlmClientConfig, log: (msg: string) => void): LlmClient {
-  if (!config.apiKey) {
-    throw new Error("LLM api-key mode requires llm.apiKey or embedding.apiKey");
-  }
-
-  const client = new OpenAI({
-    apiKey: config.apiKey,
-    baseURL: config.baseURL,
-    timeout: config.timeoutMs ?? 30000,
-  });
-  let lastError: string | null = null;
+export function createLlmClient(config: LlmClientConfig): LlmClient {
+  const baseURL = (config.baseURL || "http://127.0.0.1:11434/v1").replace(/\/+$/, "");
+  // 4F.1: default 45s, hard cap 50s
+  const timeoutMs = Math.min(config.timeoutMs ?? 45000, 50000);
+  const log = config.log ?? (() => {});
 
   return {
     async completeJson<T>(prompt: string, label = "generic"): Promise<T | null> {

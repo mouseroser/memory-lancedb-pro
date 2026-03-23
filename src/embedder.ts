@@ -8,7 +8,13 @@
  * these fields, so we pass them via a narrow `any` cast.
  */
 
-import OpenAI from "openai";
+/**
+ * NOTE: This file was originally using the `openai` npm SDK purely as an HTTP
+ * client to call OpenAI-compatible APIs (in our case, local Ollama).
+ * We replaced it with native `fetch` to eliminate the `openai` dependency
+ * entirely, since we only ever call local Ollama's embedding endpoint.
+ * — 2026-03-15
+ */
 import { createHash } from "node:crypto";
 import { smartChunk } from "./chunker.js";
 
@@ -393,16 +399,19 @@ export function getVectorDimensions(model: string, overrideDims?: number): numbe
 // ============================================================================
 
 export class Embedder {
-  /** Pool of OpenAI clients — one per API key for round-robin rotation. */
-  private clients: OpenAI[];
-  /** Round-robin index for client rotation. */
+  /**
+   * Pool of API key + baseURL pairs for round-robin rotation.
+   * Replaces the old OpenAI SDK client pool.
+   */
+  private _keys: string[];
+  private _baseURL: string;
+  /** Round-robin index for key rotation. */
   private _clientIndex: number = 0;
 
   public readonly dimensions: number;
   private readonly _cache: EmbeddingCache;
 
   private readonly _model: string;
-  private readonly _baseURL?: string;
   private readonly _taskQuery?: string;
   private readonly _taskPassage?: string;
   private readonly _normalized?: boolean;
@@ -419,7 +428,7 @@ export class Embedder {
     const resolvedKeys = apiKeys.map(k => resolveEnvVars(k));
 
     this._model = config.model;
-    this._baseURL = config.baseURL;
+    this._baseURL = config.baseURL || "http://127.0.0.1:11434/v1";
     this._taskQuery = config.taskQuery;
     this._taskPassage = config.taskPassage;
     this._normalized = config.normalized;
@@ -441,29 +450,10 @@ export class Embedder {
       );
     }
 
-    // Create a client pool — one OpenAI client per key
-    this.clients = resolvedKeys.map(key => {
-      let defaultHeaders: Record<string, string> = {};
-      let baseURL = config.baseURL;
+    this._keys = resolvedKeys;
 
-      if (config.provider === "azure-openai" || profile === "azure-openai") {
-        defaultHeaders["api-key"] = key;
-        if (baseURL && config.apiVersion) {
-          const url = new URL(baseURL);
-          url.searchParams.set("api-version", config.apiVersion);
-          baseURL = url.toString();
-        }
-      }
-
-      return new OpenAI({
-        apiKey: key,
-        ...(baseURL ? { baseURL } : {}),
-        defaultHeaders: Object.keys(defaultHeaders).length > 0 ? defaultHeaders : undefined,
-      });
-    });
-
-    if (this.clients.length > 1) {
-      console.log(`[memory-lancedb-pro] Initialized ${this.clients.length} API keys for round-robin rotation`);
+    if (this._keys.length > 1) {
+      console.log(`[memory-lancedb-pro] Initialized ${this._keys.length} API keys for round-robin rotation`);
     }
 
     this.dimensions = getVectorDimensions(config.model, config.dimensions);
@@ -471,14 +461,14 @@ export class Embedder {
   }
 
   // --------------------------------------------------------------------------
-  // Multi-key rotation helpers
+  // Native fetch-based embedding calls (replaces OpenAI SDK)
   // --------------------------------------------------------------------------
 
-  /** Return the next client in round-robin order. */
-  private nextClient(): OpenAI {
-    const client = this.clients[this._clientIndex % this.clients.length];
-    this._clientIndex = (this._clientIndex + 1) % this.clients.length;
-    return client;
+  /** Return the next API key in round-robin order. */
+  private nextKey(): string {
+    const key = this._keys[this._clientIndex % this._keys.length];
+    this._clientIndex = (this._clientIndex + 1) % this._keys.length;
+    return key;
   }
 
   /** Check whether an error is a rate-limit / quota-exceeded / overload error. */
@@ -506,19 +496,35 @@ export class Embedder {
   }
 
   /**
-   * Call embeddings.create with automatic key rotation on rate-limit errors.
+   * Call the OpenAI-compatible /embeddings endpoint using native fetch.
    * Tries each key in the pool at most once before giving up.
    * Accepts an optional AbortSignal to support true request cancellation.
    */
-  private async embedWithRetry(payload: any, signal?: AbortSignal): Promise<any> {
-    const maxAttempts = this.clients.length;
+  private async embedWithRetry(payload: any): Promise<any> {
+    const maxAttempts = this._keys.length;
     let lastError: Error | undefined;
+    const url = `${this._baseURL.replace(/\/+$/, "")}/embeddings`;
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      const client = this.nextClient();
+      const apiKey = this.nextKey();
       try {
-        // Pass signal to OpenAI SDK if provided (SDK v6+ supports this)
-        return await client.embeddings.create(payload, signal ? { signal } : undefined);
+        const response = await fetch(url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(apiKey ? { "Authorization": `Bearer ${apiKey}` } : {}),
+          },
+          body: JSON.stringify(payload),
+        });
+
+        if (!response.ok) {
+          const body = await response.text().catch(() => "");
+          const err: any = new Error(`Embedding HTTP ${response.status}: ${body}`);
+          err.status = response.status;
+          throw err;
+        }
+
+        return await response.json();
       } catch (error) {
         // If aborted, re-throw immediately
         if (error instanceof Error && error.name === 'AbortError') {
@@ -550,7 +556,7 @@ export class Embedder {
 
   /** Number of API keys in the rotation pool. */
   get keyCount(): number {
-    return this.clients.length;
+    return this._keys.length;
   }
 
   /** Wrap a single embedding operation with a global timeout via AbortSignal. */
@@ -920,7 +926,7 @@ export class Embedder {
   get cacheStats() {
     return {
       ...this._cache.stats,
-      keyCount: this.clients.length,
+      keyCount: this._keys.length,
     };
   }
 }
