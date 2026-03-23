@@ -276,8 +276,8 @@ const DEFAULT_LAYER3_FALLBACK: Required<Omit<Layer3FallbackSettings, "triggers">
     timeKeywords: ["今天", "昨天", "最近", "本周", "上周", "这个月"],
     reasoningKeywords: ["为什么", "如何", "怎么", "对比", "区别"],
     minResults: 3,
-    minScore: 0.5,
-    minAvgScore: 0.4,
+    minScore: 0.35, // 4F.5
+    minAvgScore: 0.3, // 4F.5
     explicitKeywords: ["详细", "完整", "历史", "所有", "全部"],
   },
 };
@@ -292,10 +292,11 @@ export function resolveLayer3FallbackSettings(config?: Layer3FallbackSettings) {
     },
   };
 
+  // 4F.1: default 45s, hard cap 50s
   const normalizedTimeout = Number.isFinite(resolved.timeout)
     ? Math.floor(resolved.timeout)
     : DEFAULT_LAYER3_FALLBACK.timeout;
-  resolved.timeout = Math.max(1, normalizedTimeout || DEFAULT_LAYER3_FALLBACK.timeout);
+  resolved.timeout = Math.min(50, Math.max(1, normalizedTimeout || DEFAULT_LAYER3_FALLBACK.timeout));
 
   return resolved;
 }
@@ -362,6 +363,7 @@ function isRetryableLayer3Error(error?: string): boolean {
   return retryablePatterns.some((pattern) => error.toLowerCase().includes(pattern));
 }
 
+// 4F.3: 3000-char hard truncation for L3 query results
 function truncateLayer3Text(text: string, maxChars: number = 3000): {
   text: string;
   originalLength: number;
@@ -381,7 +383,7 @@ function truncateLayer3Text(text: string, maxChars: number = 3000): {
 
   const kept = text.slice(0, maxChars);
   return {
-    text: `${kept}\n\n[TRUNCATED original_length=${originalLength} kept=${maxChars}]`,
+    text: `${kept}\n\n[TRUNCATED ${originalLength - maxChars} chars]`,
     originalLength,
     keptLength: maxChars,
     truncated: true,
@@ -1909,7 +1911,8 @@ export function registerMemoryListTool(
                 .toISOString()
                 .split("T")[0];
               const categoryTag = getDisplayCategoryTag(entry);
-              return `${safeOffset + i + 1}. [${entry.id}] [${categoryTag}] ${entry.text.slice(0, 100)}${entry.text.length > 100 ? "..." : ""} (${date})`;
+              const imp = entry.importance != null ? ` imp=${entry.importance}` : '';
+              return `${safeOffset + i + 1}. [${entry.id}] [${categoryTag}]${imp} ${entry.text.slice(0, 90)}${entry.text.length > 90 ? "..." : ""} (${date})`;
             })
             .join("\n");
 
