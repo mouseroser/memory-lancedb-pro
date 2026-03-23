@@ -961,7 +961,7 @@ describe("memory reflection", () => {
       assert.deepEqual(slices.derived, ["Next run verify the system prompt includes the expected safety footer."]);
     });
 
-    it("keeps legitimate derived lines that ignore or override previous non-prompt context", () => {
+    it("drops ignore/override phrasing from derived lines under local stricter injection policy", () => {
       const now = Date.UTC(2026, 2, 7);
       const day = 24 * 60 * 60 * 1000;
 
@@ -1018,10 +1018,7 @@ describe("memory reflection", () => {
         deriveMaxAgeMs: 7 * day,
       });
 
-      assert.equal(slices.derived.length, 3);
-      assert.ok(slices.derived.includes("Next run ignore previous benchmark noise and verify on clean fixtures."));
-      assert.ok(slices.derived.includes("Ignore prior flaky results before comparing the new retriever output."));
-      assert.ok(slices.derived.includes("This run override previous cached screenshots with fresh captures."));
+      assert.equal(slices.derived.length, 0);
     });
   });
 
@@ -1165,9 +1162,9 @@ describe("memory reflection", () => {
       assert.equal(parsed.sessionStrategy, "memoryReflection");
     });
 
-    it("defaults to systemSessionMemory when neither field is set", () => {
+    it("defaults to none when neither field is set under local runtime policy", () => {
       const parsed = parsePluginConfig(baseConfig());
-      assert.equal(parsed.sessionStrategy, "systemSessionMemory");
+      assert.equal(parsed.sessionStrategy, "none");
     });
 
     it("defaults writeLegacyCombined=true for memoryReflection config", () => {
