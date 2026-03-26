@@ -55,7 +55,8 @@ export interface RetrievalConfig {
     | "voyage"
     | "pinecone"
     | "dashscope"
-    | "tei";
+    | "tei"
+    | "local";
   /**
    * Length normalization: penalize long entries that dominate via sheer keyword
    * density. Formula: score *= 1 / (1 + log2(charLen / anchor)).
@@ -162,7 +163,8 @@ type RerankProvider =
   | "voyage"
   | "pinecone"
   | "dashscope"
-  | "tei";
+  | "tei"
+  | "local";
 
 interface RerankItem {
   index: number;
@@ -250,6 +252,19 @@ function buildRerankRequest(
           top_n: topN,
         },
       };
+    case "local":
+      // Local sidecar at 127.0.0.1:8765, Jina-compatible format
+      return {
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: {
+          model,
+          query,
+          documents: candidates,
+          top_n: topN,
+        },
+      };
   }
 }
 
@@ -321,8 +336,9 @@ function parseRerankResponse(
     }
     case "siliconflow":
     case "jina":
+    case "local":
     default: {
-      // Jina / SiliconFlow: usually { results: [{ index, relevance_score }] }
+      // Jina / SiliconFlow / Local sidecar: usually { results: [{ index, relevance_score }] }
       // Also tolerate data[] for compatibility across gateways.
       return (
         parseItems(objectData?.results, ["relevance_score", "score"]) ??
@@ -743,7 +759,9 @@ export class MemoryRetriever {
         const provider = this.config.rerankProvider || "jina";
         const model = this.config.rerankModel || "jina-reranker-v3";
         const endpoint =
-          this.config.rerankEndpoint || "https://api.jina.ai/v1/rerank";
+          provider === "local"
+            ? "http://127.0.0.1:8765/v1/rerank"
+            : (this.config.rerankEndpoint || "https://api.jina.ai/v1/rerank");
         const documents = results.map((r) => r.entry.text);
 
         // Build provider-specific request
