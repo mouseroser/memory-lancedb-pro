@@ -55,8 +55,7 @@ export interface RetrievalConfig {
     | "voyage"
     | "pinecone"
     | "dashscope"
-    | "tei"
-    | "local";
+    | "tei";
   /**
    * Length normalization: penalize long entries that dominate via sheer keyword
    * density. Formula: score *= 1 / (1 + log2(charLen / anchor)).
@@ -86,10 +85,6 @@ export interface RetrievalConfig {
   /** Maximum half-life multiplier from access reinforcement.
    *  Prevents frequently accessed memories from becoming immortal. (default: 3) */
   maxHalfLifeMultiplier: number;
-  /** Tag prefixes for exact-match queries (default: ["proj", "env", "team", "scope"]).
-   *  Queries containing these prefixes (e.g. "proj:AIF") will use BM25-only + mustContain
-   *  to avoid semantic false positives from vector search. */
-  tagPrefixes: string[];
 }
 
 export interface RetrievalContext {
@@ -131,7 +126,6 @@ export const DEFAULT_RETRIEVAL_CONFIG: RetrievalConfig = {
   timeDecayHalfLifeDays: 60,
   reinforcementFactor: 0.5,
   maxHalfLifeMultiplier: 3,
-  tagPrefixes: ["proj", "env", "team", "scope"],
 };
 
 // ============================================================================
@@ -163,8 +157,7 @@ type RerankProvider =
   | "voyage"
   | "pinecone"
   | "dashscope"
-  | "tei"
-  | "local";
+  | "tei";
 
 interface RerankItem {
   index: number;
@@ -179,6 +172,7 @@ function buildRerankRequest(
   query: string,
   candidates: string[],
   topN: number,
+  endpoint: string,
 ): { headers: Record<string, string>; body: Record<string, unknown> } {
   switch (provider) {
     case "tei":
@@ -239,25 +233,17 @@ function buildRerankRequest(
       };
     case "siliconflow":
     case "jina":
-    default:
-      return {
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: {
-          model,
-          query,
-          documents: candidates,
-          top_n: topN,
-        },
+    default: {
+      // Omit Authorization for localhost / 127.0.0.1 sidecar (no auth needed)
+      const isLocalhost = endpoint.includes("127.0.0.1") || endpoint.includes("localhost");
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
       };
-    case "local":
-      // Local sidecar at 127.0.0.1:8765, Jina-compatible format
+      if (!isLocalhost && apiKey) {
+        headers["Authorization"] = `Bearer ${apiKey}`;
+      }
       return {
-        headers: {
-          "Content-Type": "application/json",
-        },
+        headers,
         body: {
           model,
           query,
@@ -336,9 +322,8 @@ function parseRerankResponse(
     }
     case "siliconflow":
     case "jina":
-    case "local":
     default: {
-      // Jina / SiliconFlow / Local sidecar: usually { results: [{ index, relevance_score }] }
+      // Jina / SiliconFlow: usually { results: [{ index, relevance_score }] }
       // Also tolerate data[] for compatibility across gateways.
       return (
         parseItems(objectData?.results, ["relevance_score", "score"]) ??
@@ -397,19 +382,8 @@ export class MemoryRetriever {
     const { query, limit, scopeFilter, category, source } = context;
     const safeLimit = clampInt(limit, 1, 20);
 
-    // Check if query contains tag prefixes -> use BM25-only + mustContain
-    const tagTokens = this.extractTagTokens(query);
     let results: RetrievalResult[];
-    
-    if (tagTokens.length > 0) {
-      results = await this.bm25OnlyRetrieval(
-        query,
-        tagTokens,
-        safeLimit,
-        scopeFilter,
-        category,
-      );
-    } else if (this.config.mode === "vector" || !this.store.hasFtsSupport) {
+    if (this.config.mode === "vector" || !this.store.hasFtsSupport) {
       results = await this.vectorOnlyRetrieval(
         query,
         safeLimit,
@@ -431,15 +405,6 @@ export class MemoryRetriever {
     }
 
     return results;
-  }
-
-  private extractTagTokens(query: string): string[] {
-    if (!this.config.tagPrefixes?.length) return [];
-    
-    const pattern = this.config.tagPrefixes.join("|");
-    const regex = new RegExp(`(?:${pattern}):[\\w-]+`, "gi");
-    const matches = query.match(regex);
-    return matches || [];
   }
 
   private async vectorOnlyRetrieval(
@@ -485,64 +450,6 @@ export class MemoryRetriever {
     // MMR deduplication: avoid top-k filled with near-identical memories
     const deduplicated = this.applyMMRDiversity(denoised);
 
-    return deduplicated.slice(0, limit);
-  }
-
-  private async bm25OnlyRetrieval(
-    query: string,
-    tagTokens: string[],
-    limit: number,
-    scopeFilter?: string[],
-    category?: string,
-  ): Promise<RetrievalResult[]> {
-    const candidatePoolSize = Math.max(this.config.candidatePoolSize, limit * 2);
-    
-    // Run BM25 search
-    const bm25Results = await this.store.bm25Search(
-      query,
-      candidatePoolSize,
-      scopeFilter,
-      { excludeInactive: true },
-    );
-
-    // Filter by category if specified
-    const categoryFiltered = category
-      ? bm25Results.filter((r) => r.entry.category === category)
-      : bm25Results;
-
-    // mustContain: only keep entries that literally contain all tag tokens (case-insensitive)
-    const mustContainFiltered = categoryFiltered.filter((r) => {
-      const textLower = r.entry.text.toLowerCase();
-      return tagTokens.every((t) => textLower.includes(t.toLowerCase()));
-    });
-
-    const mapped = mustContainFiltered.map(
-      (result, index) =>
-        ({
-          ...result,
-          sources: {
-            bm25: { score: result.score, rank: index + 1 },
-          },
-        }) as RetrievalResult,
-    );
-
-    // Apply same post-processing as hybrid retrieval to avoid behavior regression
-    const temporallyRanked = this.decayEngine
-      ? mapped
-      : this.applyImportanceWeight(this.applyRecencyBoost(mapped));
-
-    const lengthNormalized = this.applyLengthNormalization(temporallyRanked);
-    const hardFiltered = lengthNormalized.filter(r => r.score >= this.config.hardMinScore);
-
-    const lifecycleRanked = this.decayEngine
-      ? this.applyDecayBoost(hardFiltered)
-      : this.applyTimeDecay(hardFiltered);
-
-    const denoised = this.config.filterNoise
-      ? filterNoise(lifecycleRanked, r => r.entry.text)
-      : lifecycleRanked;
-
-    const deduplicated = this.applyMMRDiversity(denoised);
     return deduplicated.slice(0, limit);
   }
 
@@ -759,9 +666,7 @@ export class MemoryRetriever {
         const provider = this.config.rerankProvider || "jina";
         const model = this.config.rerankModel || "jina-reranker-v3";
         const endpoint =
-          provider === "local"
-            ? "http://127.0.0.1:8765/v1/rerank"
-            : (this.config.rerankEndpoint || "https://api.jina.ai/v1/rerank");
+          this.config.rerankEndpoint || "https://api.jina.ai/v1/rerank";
         const documents = results.map((r) => r.entry.text);
 
         // Build provider-specific request
@@ -772,6 +677,7 @@ export class MemoryRetriever {
           query,
           documents,
           results.length,
+          endpoint,
         );
 
         // Timeout: 5 seconds to prevent stalling retrieval pipeline
